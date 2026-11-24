@@ -14,6 +14,15 @@
 (() => {
   "use strict";
   const P = ZSProvider;
+  // Default off; only the user-controlled setting can enable ChatGPT image feedback.
+  if (P.setVisionEnabled) {
+    try {
+      chrome.storage.local.get("zsChatGPTVisionEnabled", r => P.setVisionEnabled(r?.zsChatGPTVisionEnabled === true));
+      chrome.storage.onChanged?.addListener((changes, area) => {
+        if (area === "local" && changes.zsChatGPTVisionEnabled) P.setVisionEnabled(changes.zsChatGPTVisionEnabled.newValue === true);
+      });
+    } catch {}
+  }
   const T = P.timings;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = (...a) => console.log("[snapgentV3]", ...a);
@@ -380,7 +389,7 @@
       // feedback to be sent several times. Send ONLY while visible.
       let tries = 0;
       let messageSent = false;
-      const maxTries = Number.isInteger(P.sendRetryLimit) && P.sendRetryLimit > 0
+      const maxTries = images?.length && P.setVisionEnabled ? 1 : Number.isInteger(P.sendRetryLimit) && P.sendRetryLimit > 0
         ? P.sendRetryLimit
         : 4;
       while (!messageSent && !landed() && tries < maxTries && !A.stop) {
@@ -391,6 +400,7 @@
         await jitterBeforeSend();
         diag("submit.typeAndSend", { hasImages: !!(images && images.length) });
         await P.typeAndSend(text, images);
+        if (images?.length && P.setVisionEnabled) messageSent = true; // provider verified the exact new turn
         // Re-arm the pre-hide window NOW that typeAndSend has returned (the send
         // was just clicked, so our result turn is about to render). The initial
         // arm above can EXPIRE during an image upload - typeAndSend blocks ~3-6s
@@ -937,7 +947,7 @@
   // are handled (see the `r.images.length` branch) and turned into a plain
   // error on non-vision providers, so nothing needs to be predicted here.
   const ALWAYS_BLOCKED_TOOLS = new Set(["subagent"]);
-  const VISION_TOOLS = new Set(["screen_capture"]);
+  const VISION_TOOLS = new Set(["screen_capture", "fs_view_image"]);
   const bareToolName = (name) => (name && name.includes("/") ? name.split("/").pop() : name) || "";
   // Is `name` a tool we actually have? The bridge ADVERTISES names that may carry
   // a per-server prefix when two MCP servers expose the same tool (see
@@ -1103,7 +1113,7 @@
     const bareName = bareToolName(name);
     if (isBlockedTool(name)) {
       if (VISION_TOOLS.has(bareName)) {
-        return `ERROR: '${bareName}' is unavailable here - this assistant cannot see images. Do NOT call it again. Inspect the place programmatically instead (e.g. inspect_instance, get_studio_state, search_game_tree, script_read).`;
+        return `ERROR: '${bareName}' is unavailable here - image feedback is disabled or unsupported by the current provider. Do not retry unless the user explicitly enables supported image feedback. Use ordinary inspection tools instead.`;
       }
       return `ERROR: the '${bareName}' command timed out and is unavailable in this environment. Do NOT call it again - complete the task yourself using the other commands (execute_luau, multi_edit, etc.).`;
     }
@@ -1309,7 +1319,7 @@
         const caption = r.text && r.text.trim()
           ? r.text.trim()
           : `${r.images.length} image(s) captured.`;
-        return `Output of '${name}':\n${caption}\n(The image is attached to THIS message - you can see it directly. Analyse it and continue.)`;
+        return `Output of '${name}':\n${caption}\n(Inspect the image only if it is actually present in this message. Never infer visual details from metadata alone.)`;
       }
       const text = r.text && r.text.length ? r.text : "(tool returned an empty result)";
       return `Output of '${name}':\n${text}`;
@@ -3652,7 +3662,13 @@
            <div class="zs-sec-label zs-sec-label-row"><span>Switch AI</span><span><button id="zs-skills-settings" class="zs-gear" title="Skills" aria-label="Skills">&#9733;</button><button id="zs-mcp-settings" class="zs-gear" title="MCP settings" aria-label="MCP settings">&#9881;</button></span></div>
            <div class="zs-site-grid">${sites}</div>
          </section>
+         ${P.setVisionEnabled ? `<section class="zs-menu-sec"><label><input type="checkbox" id="zs-vision-enabled" ${P.supportsVision ? "checked" : ""}> Enable ChatGPT image feedback</label><div class="zs-mcp-pop-note">Uses normal provider upload limits. Off by default.</div></section>` : ""}
          ${skillsSectionHtml()}`;
+      const visionBox = menuEl.querySelector("#zs-vision-enabled");
+      if (visionBox) visionBox.addEventListener("change", () => {
+        P.setVisionEnabled(visionBox.checked);
+        try { chrome.storage.local.set({zsChatGPTVisionEnabled: visionBox.checked}); } catch {}
+      });
       const open = (url) => { try { window.open(url, "_blank", "noopener"); } catch {} menuEl.hidden = true; };
       menuEl.querySelectorAll("button.zs-site-opt, .zs-tip-opt").forEach((b) =>
         b.addEventListener("click", () => open(b.dataset.u)));

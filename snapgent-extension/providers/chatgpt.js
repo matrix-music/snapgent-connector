@@ -54,8 +54,8 @@
 //  - New chat: <a data-testid="create-new-chat-button" href="/">. A blank new
 //    chat is exactly "/"; a conversation is /c/<id>.
 //  - ChatGPT's free tier caps messages, and caps image/file input SEPARATELY, so
-//    vision is disabled here (supportsVision: false) rather than working only
-//    part of the day. ChatGPT announces the quota walls itself, in the thread.
+//    vision is disabled by default and can be explicitly enabled by the user.
+//    Provider upload limits remain in effect.
 // eslint-disable-next-line no-unused-vars
 const ZSProvider = (() => {
   "use strict";
@@ -844,6 +844,11 @@ const ZSProvider = (() => {
   async function typeAndSend(text, images) {
     const ed = getEditor();
     if (!ed) throw new Error("ChatGPT input box not found");
+    if (images && images.length) {
+      if (!visionEnabled) throw new Error("Image feedback is disabled by the user.");
+      const box = composerFrame();
+      if (!box || box.querySelector('[data-testid*="remove-attachment"], [aria-label*="Remove attachment"], [aria-label*="Remove file"]')) throw new Error("Composer unavailable or already contains an attachment; no image send attempted.");
+    }
     text = truncateForSend(text);
     const relock = _locked;
     const setEditable = (editable) => {
@@ -861,14 +866,15 @@ const ZSProvider = (() => {
       // typeAndSend for why (attaching first and then retyping the text can sever
       // the site's binding between the pending upload and the message sent).
       if (images && images.length) {
-        try { await attachImages(images); } catch {}
-        // ChatGPT disables the send button while an upload is still in flight, so
-        // poll the click instead of gating on a specific "upload done" node.
-        const t0 = Date.now();
-        while (Date.now() - t0 < 25000) {
-          const b = sendButton();
-          if (b && !b.disabled) { try { b.click(); } catch {} }
-          if (await waitFor(() => editorText().trim() === "" || !!stopButton(), 1200)) return;
+        if (!visionEnabled) throw new Error("Image feedback is disabled by the user.");
+        const previous = new Set(allItems().filter(isUserItem).map(itemKey));
+        const files = await attachImages(images);
+        if (!(await waitFor(() => !document.hidden && !uploadError() && !!sendButton() && !sendButton().disabled && files.every(name => hasAttachment(composerFrame(), name)), 25000))) {
+          throw new Error("Image upload was not ready or the provider blocked it. No send was attempted. Inspect the composer and provider limits before continuing.");
+        }
+        sendButton().click(); // exactly one attempt; never retry ambiguous image sends
+        if (!(await waitFor(() => allItems().filter(isUserItem).some(item => !previous.has(itemKey(item)) && files.every(name => hasAttachment(item, name))), 15000))) {
+          throw new Error("Image message delivery could not be confirmed. Do not retry automatically; inspect the conversation and composer.");
         }
         return;
       }
@@ -963,35 +969,43 @@ const ZSProvider = (() => {
   const isTooLongMsg = (text) => RE.tooLong.test(text);
   const isBusyMsg = (text) => RE.busy.test(text);
 
-  // ── Image attachment (best effort: paste + hidden file input) ─────────────
+  // Image feedback is explicitly enabled by the user, never by a tool result.
+  let visionEnabled = false;
+  function setVisionEnabled(value) { visionEnabled = value === true; }
+  const imageMime = new Set(["image/png", "image/jpeg", "image/webp"]);
   function fileFromImage(img, i) {
-    const mime = img.mimeType || "image/jpeg";
+    const mime = img.mimeType;
+    if (!imageMime.has(mime) || typeof img.data !== "string" || img.data.length > 12 * 1024 * 1024) throw new Error("Unsupported or oversized image payload");
     const bin = atob(img.data);
-    const arr = new Uint8Array(bin.length);
-    for (let j = 0; j < bin.length; j++) arr[j] = bin.charCodeAt(j);
-    const ext = mime.includes("png") ? "png" : "jpg";
-    return new File([arr], `snapgentV3_${Date.now()}_${i}.${ext}`, { type: mime });
+    if (!bin.length || bin.length > 8 * 1024 * 1024) throw new Error("Invalid image size");
+    const arr = Uint8Array.from(bin, c => c.charCodeAt(0));
+    const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
+    return new File([arr], `snapgent-image-${crypto.randomUUID()}-${i}.${ext}`, { type: mime });
+  }
+  function hasAttachment(root, name) {
+    if (!root) return false;
+    return [...root.querySelectorAll('img, [title], [aria-label], [data-filename]')].some(el =>
+      [el.getAttribute("alt"), el.getAttribute("title"), el.getAttribute("aria-label"), el.getAttribute("data-filename")].some(value => value && value.includes(name)));
+  }
+  function uploadError() {
+    return [...document.querySelectorAll('[role="alert"], [data-sonner-toast]')].some(el => /upload|file limit|quota|too many files|try again later/i.test(el.textContent || ""));
   }
   async function attachImages(images) {
-    const ed = getEditor();
-    if (!ed || !images || !images.length) return false;
+    const box = composerFrame();
+    if (!box || !visionEnabled || !images.length || images.length > 4) throw new Error("Image feedback unavailable or batch exceeds four images");
+    if (uploadError()) throw new Error("Provider reports an upload error or limit. No upload attempted.");
+    if (box.querySelector('[data-testid*="remove-attachment"], [aria-label*="Remove attachment"], [aria-label*="Remove file"]')) throw new Error("Composer already contains an attachment; no upload attempted.");
     const dt = new DataTransfer();
-    images.forEach((img, i) => { try { dt.items.add(fileFromImage(img, i)); } catch {} });
-    if (!dt.items.length) return false;
-    ed.focus();
-    ed.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
-    // The real upload input (validated live 2026-08); the generic selector is a
-    // fallback in case the testid is renamed.
-    const fileInput = document.querySelector('input[data-testid="upload-photos-input"]') ||
-      document.querySelector('input[type="file"]');
-    if (fileInput) {
-      try { fileInput.files = dt.files; fileInput.dispatchEvent(new Event("change", { bubbles: true })); } catch {}
-    }
-    // An upload preview appearing near the composer is the success signal.
-    return await waitFor(() => {
-      const box = composerFrame();
-      return !!(box && box.querySelector("img, [class*='preview'], [class*='thumbnail']"));
-    }, 15000);
+    const files = images.map(fileFromImage);
+    files.forEach(file => dt.items.add(file));
+    const input = document.querySelector('input[data-testid="upload-photos-input"]');
+    if (!input) throw new Error("ChatGPT image upload input unavailable. No upload attempted.");
+    // A single event on the specific upload input; never also paste.
+    input.files = dt.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    const names = files.map(file => file.name);
+    if (!(await waitFor(() => !uploadError() && names.every(name => hasAttachment(composerFrame(), name)), 15000))) throw new Error("Image attachment was not confirmed. No send attempted; inspect the composer before continuing.");
+    return names;
   }
   function clearAttachments() {
     try {
@@ -1175,14 +1189,10 @@ const ZSProvider = (() => {
     // Internal helpers exposed ONLY so the Node tests can pin them down. They
     // are pure string functions with no DOM dependency, and none of them is
     // reachable from the core, so this does not widen the provider's surface.
-    __test: { stripAssistantSrPrefix, LOOKS_GLUED, turnSettled },
-    // Vision OFF, like DeepSeek's text-only Expert tab. ChatGPT's free tier caps
-    // image/file input separately from messages ("les fichiers, les images et
-    // l'analyse sont indisponibles jusqu'à la réinitialisation de votre quota"),
-    // so screen_capture would work sometimes and fail the rest of the time - the
-    // worst kind of behaviour to hand a model. The core blocks the vision tools
-    // outright instead (see main.js VISION_TOOLS).
-    supportsVision: false,
+    __test: { stripAssistantSrPrefix, LOOKS_GLUED, turnSettled, hasAttachment, fileFromImage, uploadError },
+    // Opt-in only; no change to provider upload limits.
+    get supportsVision() { return visionEnabled; },
+    setVisionEnabled,
     // No coverOffsetY: the cover is centred on coverTarget(), the scrolling text
     // band, whose rect centre already lines up with the composer's icons. (Sizing
     // it to the EDITOR needed a -paddingBottom/2 nudge, because that node carries

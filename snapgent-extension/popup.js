@@ -70,3 +70,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 refresh();
 setInterval(refresh, 2000);
+
+const visionToggle = document.getElementById("chatgpt-vision");
+chrome.storage.local.get("zsChatGPTVisionEnabled", r => { visionToggle.checked = r?.zsChatGPTVisionEnabled === true; });
+visionToggle.addEventListener("change", () => chrome.storage.local.set({zsChatGPTVisionEnabled: visionToggle.checked}));

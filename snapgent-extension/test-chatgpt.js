@@ -268,6 +268,47 @@ ok("mobile textarea text can be read", P.editorText() === "");
   ok("mobile composer relocks after sending", mobileComposer.getAttribute("readonly") === "");
   P.setInputLock(false);
   ok("mobile composer unlocks after startup", mobileComposer.getAttribute("readonly") === null);
+  ok("vision defaults off", P.supportsVision === false);
+  P.setVisionEnabled(true);
+  ok("vision can be explicitly enabled", P.supportsVision === true);
+  const originalQuery = document.querySelector;
+  const originalQueryAll = document.querySelectorAll;
+  let uploads = 0, sends = 0, names = [], alerts = [], mode = "success";
+  global.DataTransfer = class { constructor() { this.files = []; this.items = { add: f => this.files.push(f) }; } };
+  if (!global.File) global.File = require("node:buffer").File;
+  if (!global.crypto) global.crypto = require("node:crypto").webcrypto;
+  const preview = name => el("img", {attrs:{alt:name}}, []);
+  composerForm.querySelector = () => null;
+  composerForm.querySelectorAll = () => names.map(preview);
+  const fileInput = { files: [], dispatchEvent(event) { uploads++; if (event.type !== "change") throw Error("unexpected upload event"); names = mode === "missing" ? [] : this.files.map(f => f.name); } };
+  document.querySelector = selector => selector.includes('upload-photos-input') ? fileInput : originalQuery(selector);
+  document.querySelectorAll = selector => selector.includes('role="alert"') ? alerts : originalQueryAll(selector);
+  submitControl.click = () => { sends++; mobileComposer.value = ""; if (mode === "success") messageNodes.push(el("div", {attrs:{"data-message-author-role":"user","data-message-id":`image-turn-${sends}`}}, names.map(preview))); names = []; };
+  const image = {mimeType:"image/png",data:"iVBORw0KGgo="};
+  const clock = Date.now;
+  let simulated = clock();
+  Date.now = () => simulated += 1000;
+  try {
+    messageNodes = [];
+    await P.typeAndSend("image result", [image]);
+    ok("image attaches once and sends once", uploads === 1 && sends === 1);
+    await P.typeAndSend("next image result", [image]);
+    ok("second image gets a separate confirmed turn", uploads === 2 && sends === 2 && messageNodes.length === 2);
+    mode = "missing";
+    let failed = false;
+    try { await P.typeAndSend("missing attachment", [image]); } catch { failed = true; }
+    ok("unconfirmed attachment never sends", failed && uploads === 3 && sends === 2);
+    mode = "unconfirmed"; failed = false;
+    try { await P.typeAndSend("unconfirmed delivery", [image]); } catch { failed = true; }
+    ok("unconfirmed delivery throws without retry", failed && uploads === 4 && sends === 3);
+    alerts = [{textContent:"Upload quota exceeded"}]; failed = false;
+    try { await P.typeAndSend("quota failure", [image]); } catch { failed = true; }
+    ok("provider limit prevents upload and send", failed && uploads === 4 && sends === 3);
+    alerts = []; P.setVisionEnabled(false); failed = false;
+    try { await P.typeAndSend("disabled vision", [image]); } catch { failed = true; }
+    ok("disabled vision prevents upload and send", failed && uploads === 4 && sends === 3);
+  } finally { Date.now = clock; }
+
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
