@@ -790,13 +790,19 @@ const ZSProvider = (() => {
         if (!visionEnabled) throw new Error("Image feedback is disabled by the user.");
         const previous = new Set(allItems().filter(isUserItem).map(itemKey));
         const files = await attachImages(images);
-        if (!(await waitFor(() => !document.hidden && !uploadError() && !!sendButton() && !sendButton().disabled && files.every(name => hasAttachment(composerFrame(), name)), 25000))) {
+        const ready = () => !document.hidden && visionEnabled && !uploadError() && !!sendButton() && !sendButton().disabled && files.every(name => hasAttachment(composerFrame(), name));
+        await waitFor(() => !visionEnabled || uploadError() || ready(), 25000);
+        if (!ready()) {
+          diag("image.sendBlocked", { providerError: uploadError(), enabled: visionEnabled });
           throw new Error("Image upload was not ready or the provider blocked it. No send was attempted. Inspect the composer and provider limits before continuing.");
         }
+        diag("image.sendAttempt", { count: files.length });
         sendButton().click(); // exactly one attempt; never retry ambiguous image sends
         if (!(await waitFor(() => allItems().filter(isUserItem).some(item => !previous.has(itemKey(item)) && files.every(name => hasAttachment(item, name))), 15000))) {
+          diag("image.deliveryUnconfirmed", {});
           throw new Error("Image message delivery could not be confirmed. Do not retry automatically; inspect the conversation and composer.");
         }
+        diag("image.deliveryConfirmed", { count: files.length });
         return;
       }
       // Wait for the control to be in its SEND role (proof ProseMirror registered
@@ -903,6 +909,19 @@ const ZSProvider = (() => {
     const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
     return new File([arr], `snapgent-image-${crypto.randomUUID()}-${i}.${ext}`, { type: mime });
   }
+  // Keep selection local to the active composer. A renamed input is safe only
+  // when exactly one eligible image-capable input belongs to that composer.
+  function imageUploadInput(box) {
+    const candidates = [...box.querySelectorAll('input[type="file"]')].filter(input => {
+      if (input.disabled) return false;
+      const accept = (input.getAttribute("accept") || "").toLowerCase().split(",").map(x => x.trim());
+      return accept.some(x => x === "image/*" || x === "image/png" || x === "image/jpeg" || x === "image/webp" || x === ".png" || x === ".jpg" || x === ".jpeg" || x === ".webp");
+    });
+    const named = candidates.filter(input => input.getAttribute("data-testid") === "upload-photos-input");
+    if (named.length === 1) return named[0];
+    if (named.length > 1 || candidates.length !== 1) return null;
+    return candidates[0];
+  }
   function hasAttachment(root, name) {
     if (!root) return false;
     return [...root.querySelectorAll('img, [title], [aria-label], [data-filename]')].some(el =>
@@ -919,13 +938,24 @@ const ZSProvider = (() => {
     const dt = new DataTransfer();
     const files = images.map(fileFromImage);
     files.forEach(file => dt.items.add(file));
-    const input = document.querySelector('input[data-testid="upload-photos-input"]');
-    if (!input) throw new Error("ChatGPT image upload input unavailable. No upload attempted.");
+    const input = imageUploadInput(box);
+    if (!input) {
+      diag("image.inputUnavailable", {});
+      throw new Error("ChatGPT composer image upload input unavailable or ambiguous. No upload attempted.");
+    }
+    if (document.hidden || !visionEnabled || uploadError()) throw new Error("Image upload canceled or blocked. No upload attempted.");
+    if (input.files && input.files.length) throw new Error("Upload input already contains files. No upload attempted.");
+    diag("image.inputSelected", { count: files.length });
     // A single event on the specific upload input; never also paste.
     input.files = dt.files;
     input.dispatchEvent(new Event("change", { bubbles: true }));
+    diag("image.uploadDispatched", { count: files.length });
     const names = files.map(file => file.name);
-    if (!(await waitFor(() => !uploadError() && names.every(name => hasAttachment(composerFrame(), name)), 15000))) throw new Error("Image attachment was not confirmed. No send attempted; inspect the composer before continuing.");
+    if (!(await waitFor(() => !visionEnabled || uploadError() || names.every(name => hasAttachment(composerFrame(), name)), 15000)) || !visionEnabled || uploadError()) {
+      diag("image.previewUnconfirmed", { providerError: uploadError(), enabled: visionEnabled });
+      throw new Error("Image attachment was not confirmed or upload was blocked. No send attempted; inspect the composer before continuing.");
+    }
+    diag("image.previewConfirmed", { count: names.length });
     return names;
   }
   function clearAttachments() {
