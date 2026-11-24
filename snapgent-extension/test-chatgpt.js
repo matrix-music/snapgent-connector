@@ -278,6 +278,7 @@ ok("mobile textarea text can be read", P.editorText() === "");
   ok("vision defaults off", P.supportsVision === false);
   P.setVisionEnabled(true);
   ok("vision can be explicitly enabled", P.supportsVision === true);
+  const originalQuery = document.querySelector;
   const originalQueryAll = document.querySelectorAll;
   let uploads = 0, sends = 0, names = [], alerts = [], mode = "success";
   let current = true;
@@ -285,10 +286,11 @@ ok("mobile textarea text can be read", P.editorText() === "");
   global.DragEvent = class { constructor(type, options) { this.type = type; Object.assign(this, options); } };
   if (!global.File) global.File = require("node:buffer").File;
   if (!global.crypto) global.crypto = require("node:crypto").webcrypto;
-  const preview = name => Object.assign(el("img", {attrs:{alt:name}}), { complete: true, naturalWidth: 660 });
+  const preview = name => Object.assign(el("img", {attrs:{alt:name}}), { complete: true, naturalWidth: 660, naturalHeight: 230 });
   composerForm.contains = node => node === submitControl;
   composerForm.querySelector = selector => {
-    if (mode === "manual" && selector.includes("data-composer-remove-image")) return {};
+    if (mode === "manual" && selector.includes("data-composer-attachments")) return {};
+    if (mode === "transcoded" && selector === 'button[aria-label="Send"]') return submitControl;
     if (mode === "uploading" && selector.includes("data-composer-image-upload-status")) return {};
     return null;
   };
@@ -297,17 +299,27 @@ ok("mobile textarea text can be read", P.editorText() === "");
     if (event.type !== "drop") throw Error("expected exactly one file drop");
     uploads++;
     names = mode === "missing" ? [] : event.dataTransfer.files.map(f => f.name);
+    if (mode === "transcoded") names = names.map(name => name.replace(/\.png$/, ".webp"));
     if (mode === "cancel") current = false;
     return false;
   };
+  document.querySelector = selector => mode === "transcoded" ? null : originalQuery(selector);
   document.querySelectorAll = selector => selector.includes('role="alert"') ? alerts : originalQueryAll(selector);
   submitControl.click = () => {
     sends++;
+    const draft = mobileComposer.value;
     mobileComposer.value = "";
     if (mode === "success") {
       const item = el("li", {attrs:{"data-message-role":"user"}}, names.map(preview));
       item.id = `image-turn-${sends}`;
       messageNodes.push(item);
+    }
+    if (mode === "transcoded" || mode === "unconfirmed") {
+      const attachment = preview("User attachment");
+      const bubble = el("div", {class:"group/user-message"},
+        [mode === "transcoded" ? draft : "Unrelated user message", attachment]);
+      bubble.querySelectorAll = selector => selector === 'button[aria-label="User attachment"] img' ? [attachment] : [];
+      messageNodes.push(el("div", {attrs:{"data-turn-key":`image-turn-${sends}`}}, [bubble]));
     }
     names = [];
   };
@@ -323,10 +335,11 @@ ok("mobile textarea text can be read", P.editorText() === "");
     messageNodes = [];
     await P.typeAndSend("image result", [image]);
     ok("image drops once and sends once", uploads === 1 && sends === 1);
+    mode = "transcoded";
     await P.typeAndSend("next image result", [image]);
-    ok("second result has a distinct named image on a new user turn",
+    ok("signed-in composer confirms a renamed WebP on the matching user turn",
       uploads === 2 && sends === 2 && messageNodes.length === 2 &&
-      messageNodes[0].querySelector("img").getAttribute("alt") !== messageNodes[1].querySelector("img").getAttribute("alt"));
+      messageNodes[1].querySelector("img").getAttribute("alt") === "User attachment");
     mode = "manual";
     ok("existing manual attachment protects the draft",
       await fails("already has an attachment", "existing attachment", [image]) && uploads === 2 && sends === 2);
@@ -340,7 +353,7 @@ ok("mobile textarea text can be read", P.editorText() === "");
     ok("stopping the active run prevents sending an uploaded image",
       await fails("canceled", "stop during upload", [image], () => current) && uploads === 5 && sends === 2);
     mode = "unconfirmed";
-    ok("unconfirmed submission throws without retry",
+    ok("unlabeled image on a different message fails confirmation without retry",
       await fails("new user turn", "unconfirmed delivery", [image]) && uploads === 6 && sends === 3);
     alerts = [{textContent:"Upload quota exceeded"}];
     ok("provider limit prevents upload and send",

@@ -963,13 +963,32 @@ const ZSProvider = (() => {
     const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
     return new File([arr], `snapgent-image-${crypto.randomUUID()}-${i}.${ext}`, { type: mime });
   }
-  const removeAttachment = '[data-composer-remove-image], [data-testid*="remove-attachment"], [aria-label^="Remove attachment"], [aria-label^="Remove file"]';
-  const pendingAttachment = '[data-composer-image-attachment-preview], ' + removeAttachment;
+  const removeAttachment = '[data-composer-remove-image], [data-testid*="remove-attachment"], [aria-label^="Remove attachment"], [aria-label^="Remove file"], [data-composer-attachments] button[aria-label^="Remove "]';
+  const pendingAttachment = '[data-composer-image-attachment-preview], [data-composer-attachments] .composer-attachment-surface, ' + removeAttachment;
   const uploadStatus = '[data-composer-image-upload-status]';
 
-  function hasImage(root, name) {
-    return [...root.querySelectorAll("img")].some(image => image.complete && image.naturalWidth > 0 &&
-      [image.getAttribute("alt"), image.getAttribute("title"), image.getAttribute("data-filename")].includes(name));
+  function namedImage(root, name) {
+    // The signed-in composer can transcode PNG/JPEG to WebP. It preserves
+    // the generated attachment stem in the preview's accessible name.
+    const webpName = name.replace(/\.(?:png|jpe?g)$/i, ".webp");
+    return [...root.querySelectorAll("img")].find(image => image.complete && image.naturalWidth > 0 &&
+      [image.getAttribute("alt"), image.getAttribute("title"), image.getAttribute("data-filename")]
+        .some(value => value === name || value === webpName));
+  }
+
+  const comparableText = text => text.trim().replace(/\s+/g, " ");
+  const imageSize = image => `${image.naturalWidth}×${image.naturalHeight}`;
+
+  function matchesUnlabeledImages(item, text, expectedSizes) {
+    // The signed-in transcript replaces filenames with "User attachment".
+    // Tie those images to our exact sent text in the new user bubble.
+    if (!isTurnKeyItem(item)) return false;
+    const user = item.querySelector('[class*="group/user-message"]');
+    if (!user || comparableText(classifyText(item, ".zs-chip")) !== text) return false;
+    const images = [...user.querySelectorAll('button[aria-label="User attachment"] img')];
+    return images.length === expectedSizes.length &&
+      images.every(image => image.complete && image.naturalWidth > 0) &&
+      images.map(imageSize).sort().every((size, i) => size === expectedSizes[i]);
   }
 
   function uploadError() {
@@ -1017,7 +1036,7 @@ const ZSProvider = (() => {
       const drop = new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true, composed: true });
       const handled = !box.dispatchEvent(drop);
       diag("image.uploadDispatched", { count: names.length, handled });
-      const uploadReady = () => names.every(name => hasImage(box, name)) && !box.querySelector(uploadStatus);
+      const uploadReady = () => names.every(name => namedImage(box, name)) && !box.querySelector(uploadStatus);
       const blocked = () => !ownsComposer() || editorText() !== draft || uploadError() ||
         box.querySelectorAll(removeAttachment).length > names.length;
       await waitFor(() => blocked() || uploadReady(), 25000);
@@ -1026,8 +1045,8 @@ const ZSProvider = (() => {
       diag("image.previewConfirmed", { count: names.length });
 
       const readySend = () => {
-        const button = sendButton();
-        return button && box.contains(button) && !button.disabled &&
+        const button = box.querySelector('button[aria-label="Send"]') || sendButton();
+        return button && box.contains(button) && button.offsetParent !== null && !button.disabled &&
           button.getAttribute("aria-disabled") !== "true" ? button : null;
       };
       await waitFor(() => blocked() || readySend(), 10000);
@@ -1036,12 +1055,18 @@ const ZSProvider = (() => {
         throw imageFailure("sendBlocked", "The image draft was not ready to send. Inspect the composer and provider limits before continuing.");
       }
       const previous = new Set(allItems().filter(isUserItem).map(itemKey));
+      const sizes = names.map(name => imageSize(namedImage(box, name))).sort();
+      const expectedText = comparableText(text);
       diag("image.sendAttempt", { count: names.length });
       button.click();
-      const delivered = () => allItems().filter(isUserItem).some(item => {
-        const key = itemKey(item);
-        return key && !previous.has(key) && names.every(name => hasImage(item, name));
-      });
+      const delivered = () => {
+        if (location.pathname !== path && !(path === "/" && conversationKey())) return false;
+        return allItems().filter(isUserItem).some(item => {
+          const key = itemKey(item);
+          return key && !previous.has(key) && (names.every(name => namedImage(item, name)) ||
+            matchesUnlabeledImages(item, expectedText, sizes));
+        });
+      };
       await waitFor(() => delivered() || uploadError(), 20000);
       if (!delivered()) throw imageFailure("deliveryUnconfirmed", "ChatGPT did not confirm the image on a new user turn. Inspect the conversation before resuming.");
       diag("image.deliveryConfirmed", { count: names.length });

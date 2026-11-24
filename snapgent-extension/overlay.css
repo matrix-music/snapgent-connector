@@ -676,6 +676,13 @@ div[contenteditable].zs-typing {
 
 /* ── tool cards (replace tool JSON / sys prompt / results) ──────── */
 .zs-hidden > *:not(.zs-chip) { display: none !important; }
+/* A ChatGPT turn can contain both the injected message and the model's reply. */
+html.zs-site-chatgpt .zs-hidden[data-turn-key] > [data-content-search-turn-key]:has([class~="group/user-message"]) {
+  display: block !important;
+}
+html.zs-site-chatgpt .zs-hidden[data-turn-key] > [data-content-search-turn-key] [class~="group/user-message"] {
+  display: none !important;
+}
 /* hide the code block / paragraph(s) containing the raw tool call */
 .zs-tool-hide { display: none !important; }
 /* Gemini: Angular recreates the <code-block> elements inside a reply (once at
