@@ -38,7 +38,7 @@
 //    carried the marker - so a per-element match hid the opener and left the
 //    whole script on screen. findToolBlockSpot hides the marker-to-marker RANGE
 //    for that shape; see there.
-//  - Image upload: <input type="file" data-testid="upload-photos-input">.
+//  - Image upload: the composer handles file drops through its attachment UI.
 //  - "Analyser" (Think) is a per-message toggle pill in the composer - a <button>
 //    with aria-pressed, class __composer-pill. We deliberately do NOT drive it:
 //    like the model picker, the reasoning mode is the user's choice. On the free
@@ -71,7 +71,7 @@ const ZSProvider = (() => {
     // is exactly why Start reported
     // "reply was never read (0 chars) - message DOM not matched".
     // The structural probes are APPENDED, so older layouts keep working.
-    msg: '[data-message-author-role],[class*="DilResponseRoot"],[data-turn-key]',
+    msg: '[data-message-author-role],[class*="DilResponseRoot"],[data-turn-key],[data-conversation-transcript] > [data-message-role]',
     userRole: "user",
     assistantRole: "assistant",
     reply: ".markdown",
@@ -133,6 +133,8 @@ const ZSProvider = (() => {
   const role = (item) => {
     const attr = item && item.getAttribute ? item.getAttribute("data-message-author-role") : null;
     if (attr) return attr;
+    const transcriptRole = item?.getAttribute?.("data-message-role");
+    if (transcriptRole) return transcriptRole;
     // New markup: the container itself carries the turn, the role lives inside it.
     if (isTurnKeyItem(item)) return "turn";
     return null;
@@ -194,7 +196,9 @@ const ZSProvider = (() => {
   };
   const replyNodes = (item) => {
     if (isDilReply(item)) return [item];
-    const native = [...item.querySelectorAll(S.reply)];
+    const selector = item.getAttribute("data-message-role") === S.assistantRole
+      ? 'section[aria-label="DIL content"]' : S.reply;
+    const native = [...item.querySelectorAll(selector)];
     if (native.length) return native;
     return turnAssistantBlocks(item);
   };
@@ -386,8 +390,10 @@ const ZSProvider = (() => {
   // a monotonic number, so the core's numeric "old id" shortcut simply doesn't
   // apply here (Number(uuid) is NaN and that guard is skipped) - the
   // settled-history guard covers the same case provider-agnostically.
-  const itemKey = (item) =>
-    (item && item.getAttribute ? item.getAttribute("data-message-id") : null) || null;
+  const itemKey = (item) => item?.getAttribute?.("data-turn-key")
+    || item?.getAttribute?.("data-message-id")
+    || (item?.getAttribute?.("data-message-role") ? item.id : null)
+    || null;
   const lastAssistantId = () => itemKey(lastAssistant());
 
   const chatIsEmpty = () => allItems().length === 0;
@@ -480,14 +486,18 @@ const ZSProvider = (() => {
     _locked = on;
     const ed = getEditor();
     if (!ed) return;
-    if (ed instanceof HTMLTextAreaElement) {
-      if (on) ed.setAttribute("readonly", "");
-      else ed.removeAttribute("readonly");
-    } else {
-      ed.setAttribute("contenteditable", on ? "false" : "true");
-    }
+    setEditorEditable(ed, !on);
     if (on) ed.setAttribute("data-zs-locked", "1");
     else ed.removeAttribute("data-zs-locked");
+  }
+
+  function setEditorEditable(ed, editable) {
+    if (ed instanceof HTMLTextAreaElement) {
+      if (editable) ed.removeAttribute("readonly");
+      else ed.setAttribute("readonly", "");
+    } else {
+      ed.setAttribute("contenteditable", editable ? "true" : "false");
+    }
   }
 
   // ── Action buttons (send / stop) ──────────────────────────────────────────
@@ -762,49 +772,15 @@ const ZSProvider = (() => {
     await typeEditorText(ed, text);
   }
 
-  async function typeAndSend(text, images) {
+  async function typeAndSend(text, images, isCurrent = () => true) {
     const ed = getEditor();
+    if (images?.length) return sendImageFeedback(ed, truncateForSend(text), images, isCurrent);
     if (!ed) throw new Error("ChatGPT input box not found");
-    if (images && images.length) {
-      if (!visionEnabled) throw new Error("Image feedback is disabled by the user.");
-      const box = composerFrame();
-      if (!box || box.querySelector('[data-testid*="remove-attachment"], [aria-label*="Remove attachment"], [aria-label*="Remove file"]')) throw new Error("Composer unavailable or already contains an attachment; no image send attempted.");
-    }
     text = truncateForSend(text);
     const relock = _locked;
-    const setEditable = (editable) => {
-      if (ed instanceof HTMLTextAreaElement) {
-        if (editable) ed.removeAttribute("readonly");
-        else ed.setAttribute("readonly", "");
-      } else {
-        ed.setAttribute("contenteditable", editable ? "true" : "false");
-      }
-    };
-    if (relock) setEditable(true); // injection needs the composer to be editable
+    if (relock) setEditorEditable(ed, true); // injection needs the composer to be editable
     try {
       await setEditorText(ed, text);
-      // Attach images LAST, right before the send click - see gemini.js/deepseek.js
-      // typeAndSend for why (attaching first and then retyping the text can sever
-      // the site's binding between the pending upload and the message sent).
-      if (images && images.length) {
-        if (!visionEnabled) throw new Error("Image feedback is disabled by the user.");
-        const previous = new Set(allItems().filter(isUserItem).map(itemKey));
-        const files = await attachImages(images);
-        const ready = () => !document.hidden && visionEnabled && !uploadError() && !!sendButton() && !sendButton().disabled && files.every(name => hasAttachment(composerFrame(), name));
-        await waitFor(() => !visionEnabled || uploadError() || ready(), 25000);
-        if (!ready()) {
-          diag("image.sendBlocked", { providerError: uploadError(), enabled: visionEnabled });
-          throw new Error("Image upload was not ready or the provider blocked it. No send was attempted. Inspect the composer and provider limits before continuing.");
-        }
-        diag("image.sendAttempt", { count: files.length });
-        sendButton().click(); // exactly one attempt; never retry ambiguous image sends
-        if (!(await waitFor(() => allItems().filter(isUserItem).some(item => !previous.has(itemKey(item)) && files.every(name => hasAttachment(item, name))), 15000))) {
-          diag("image.deliveryUnconfirmed", {});
-          throw new Error("Image message delivery could not be confirmed. Do not retry automatically; inspect the conversation and composer.");
-        }
-        diag("image.deliveryConfirmed", { count: files.length });
-        return;
-      }
       // Wait for the control to be in its SEND role (proof ProseMirror registered
       // the text, and that no generation is in flight).
       await waitFor(() => !!sendButton(), 1500);
@@ -823,7 +799,7 @@ const ZSProvider = (() => {
       ed.dispatchEvent(new KeyboardEvent("keydown", o));
       ed.dispatchEvent(new KeyboardEvent("keyup", o));
     } finally {
-      if (relock) setEditable(false);
+      if (relock) setEditorEditable(ed, false);
     }
   }
 
@@ -909,54 +885,91 @@ const ZSProvider = (() => {
     const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
     return new File([arr], `snapgent-image-${crypto.randomUUID()}-${i}.${ext}`, { type: mime });
   }
-  // Keep selection local to the active composer. A renamed input is safe only
-  // when exactly one eligible image-capable input belongs to that composer.
-  function imageUploadInput(box) {
-    const candidates = [...box.querySelectorAll('input[type="file"]')].filter(input => {
-      if (input.disabled) return false;
-      const accept = (input.getAttribute("accept") || "").toLowerCase().split(",").map(x => x.trim());
-      return accept.some(x => x === "image/*" || x === "image/png" || x === "image/jpeg" || x === "image/webp" || x === ".png" || x === ".jpg" || x === ".jpeg" || x === ".webp");
-    });
-    const named = candidates.filter(input => input.getAttribute("data-testid") === "upload-photos-input");
-    if (named.length === 1) return named[0];
-    if (named.length > 1 || candidates.length !== 1) return null;
-    return candidates[0];
+  const removeAttachment = '[data-composer-remove-image], [data-testid*="remove-attachment"], [aria-label^="Remove attachment"], [aria-label^="Remove file"]';
+  const pendingAttachment = '[data-composer-image-attachment-preview], ' + removeAttachment;
+  const uploadStatus = '[data-composer-image-upload-status]';
+
+  function hasImage(root, name) {
+    return [...root.querySelectorAll("img")].some(image => image.complete && image.naturalWidth > 0 &&
+      [image.getAttribute("alt"), image.getAttribute("title"), image.getAttribute("data-filename")].includes(name));
   }
-  function hasAttachment(root, name) {
-    if (!root) return false;
-    return [...root.querySelectorAll('img, [title], [aria-label], [data-filename]')].some(el =>
-      [el.getAttribute("alt"), el.getAttribute("title"), el.getAttribute("aria-label"), el.getAttribute("data-filename")].some(value => value && value.includes(name)));
-  }
+
   function uploadError() {
-    return [...document.querySelectorAll('[role="alert"], [data-sonner-toast]')].some(el => /upload|file limit|quota|too many files|try again later/i.test(el.textContent || ""));
+    return [...document.querySelectorAll('[role="alert"], [data-sonner-toast]')].some(el =>
+      /upload|file limit|quota|too many files|try again later/i.test(el.textContent || ""));
   }
-  async function attachImages(images) {
+
+  function imageFailure(stage, message) {
+    diag("image." + stage);
+    const error = new Error(message);
+    error.imageFeedback = true;
+    return error;
+  }
+
+  async function sendImageFeedback(ed, text, images, isCurrent) {
     const box = composerFrame();
-    if (!box || !visionEnabled || !images.length || images.length > 4) throw new Error("Image feedback unavailable or batch exceeds four images");
-    if (uploadError()) throw new Error("Provider reports an upload error or limit. No upload attempted.");
-    if (box.querySelector('[data-testid*="remove-attachment"], [aria-label*="Remove attachment"], [aria-label*="Remove file"]')) throw new Error("Composer already contains an attachment; no upload attempted.");
-    const dt = new DataTransfer();
-    const files = images.map(fileFromImage);
-    files.forEach(file => dt.items.add(file));
-    const input = imageUploadInput(box);
-    if (!input) {
-      diag("image.inputUnavailable", {});
-      throw new Error("ChatGPT composer image upload input unavailable or ambiguous. No upload attempted.");
+    const path = location.pathname;
+    const ownsComposer = () => isCurrent() && !document.hidden && visionEnabled &&
+      location.pathname === path && getEditor() === ed && composerFrame() === box;
+    if (!ed || !box || !ed.getClientRects().length || !ownsComposer() || uploadError()) {
+      throw imageFailure("uploadBlocked", "Image upload blocked. Check the active composer, image feedback setting, and provider limits.");
     }
-    if (document.hidden || !visionEnabled || uploadError()) throw new Error("Image upload canceled or blocked. No upload attempted.");
-    if (input.files && input.files.length) throw new Error("Upload input already contains files. No upload attempted.");
-    diag("image.inputSelected", { count: files.length });
-    // A single event on the specific upload input; never also paste.
-    input.files = dt.files;
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    diag("image.uploadDispatched", { count: files.length });
-    const names = files.map(file => file.name);
-    if (!(await waitFor(() => !visionEnabled || uploadError() || names.every(name => hasAttachment(composerFrame(), name)), 15000)) || !visionEnabled || uploadError()) {
-      diag("image.previewUnconfirmed", { providerError: uploadError(), enabled: visionEnabled });
-      throw new Error("Image attachment was not confirmed or upload was blocked. No send attempted; inspect the composer before continuing.");
+    if (box.querySelector(pendingAttachment)) {
+      throw imageFailure("draftHasAttachment", "The composer already has an attachment. Inspect the current draft before continuing.");
     }
-    diag("image.previewConfirmed", { count: names.length });
-    return names;
+    if (images.length > 4) throw imageFailure("invalidBatch", "Image feedback accepts up to four images.");
+    let files;
+    try { files = images.map(fileFromImage); }
+    catch { throw imageFailure("invalidBatch", "Image feedback received an unsupported or oversized image."); }
+
+    // Finish typing before handing the files to ChatGPT's composer. Restore
+    // the input lock even if typing, upload or submission fails.
+    const relock = _locked;
+    if (relock) setEditorEditable(ed, true);
+    try {
+      await setEditorText(ed, text);
+      const draft = editorText();
+      if (!draft.trim() || !ownsComposer() || uploadError() || box.querySelector(pendingAttachment)) {
+        throw imageFailure("uploadBlocked", "The composer changed or the provider blocked image upload.");
+      }
+
+      const transfer = new DataTransfer();
+      for (const file of files) transfer.items.add(file);
+      const names = files.map(file => file.name);
+      const drop = new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true, composed: true });
+      const handled = !box.dispatchEvent(drop);
+      diag("image.uploadDispatched", { count: names.length, handled });
+      const uploadReady = () => names.every(name => hasImage(box, name)) && !box.querySelector(uploadStatus);
+      const blocked = () => !ownsComposer() || editorText() !== draft || uploadError() ||
+        box.querySelectorAll(removeAttachment).length > names.length;
+      await waitFor(() => blocked() || uploadReady(), 25000);
+      if (blocked()) throw imageFailure("uploadBlocked", "Image upload was canceled or the provider blocked it. Inspect the composer before continuing.");
+      if (!uploadReady()) throw imageFailure("previewUnconfirmed", "ChatGPT did not show a ready image attachment. Inspect the composer before continuing.");
+      diag("image.previewConfirmed", { count: names.length });
+
+      const readySend = () => {
+        const button = sendButton();
+        return button && box.contains(button) && !button.disabled &&
+          button.getAttribute("aria-disabled") !== "true" ? button : null;
+      };
+      await waitFor(() => blocked() || readySend(), 10000);
+      const button = readySend();
+      if (blocked() || !button || !uploadReady()) {
+        throw imageFailure("sendBlocked", "The image draft was not ready to send. Inspect the composer and provider limits before continuing.");
+      }
+      const previous = new Set(allItems().filter(isUserItem).map(itemKey));
+      diag("image.sendAttempt", { count: names.length });
+      button.click();
+      const delivered = () => allItems().filter(isUserItem).some(item => {
+        const key = itemKey(item);
+        return key && !previous.has(key) && names.every(name => hasImage(item, name));
+      });
+      await waitFor(() => delivered() || uploadError(), 20000);
+      if (!delivered()) throw imageFailure("deliveryUnconfirmed", "ChatGPT did not confirm the image on a new user turn. Inspect the conversation before resuming.");
+      diag("image.deliveryConfirmed", { count: names.length });
+    } finally {
+      if (relock && _locked) setEditorEditable(ed, false);
+    }
   }
   function clearAttachments() {
     try {
@@ -986,7 +999,7 @@ const ZSProvider = (() => {
 
   // "/" = a fresh chat whose conversation id is not assigned yet → "" (transient)
   // so the core never persists it as "started"; /c/<id> = a real conversation.
-  const conversationKey = () => (/^\/c\//.test(location.pathname) ? location.pathname : "");
+  const conversationKey = () => (/^\/(?:c|uc)\//.test(location.pathname) ? location.pathname : "");
 
   // ── ChatGPT-only system-prompt rules ──────────────────────────────────────
   // Appended to the shared system prompt via core/config.js's `providerNotes`
@@ -1180,7 +1193,7 @@ const ZSProvider = (() => {
     turnHalted, findContinueBtn, clickContinueBtn,
     scanError, isTooLongMsg, isBusyMsg,
     // actions
-    attachImages, clearAttachments, openNewChat, conversationKey,
+    clearAttachments, openNewChat, conversationKey,
     installSendHooks, findToolBlockSpot,
     promptExtra: PROMPT_EXTRA,
     // ChatGPT summarises its own context aggressively and loses the "an

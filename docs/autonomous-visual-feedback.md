@@ -2,20 +2,30 @@
 
 Companion ChatCMD branch: `implementation/autonomous-visual-feedback`.
 
-The browser extension and desktop extension provider copies support native MCP image results when the user enables **Enable ChatGPT image feedback** in the extension controls. The preference is disabled by default. The existing bridge and background image transport are reused. Supported provider attachment MIME types are PNG, JPEG and WebP, with a maximum of four images and 8 MiB each; the companion ChatCMD file reader emits PNG only.
+Select **Enable ChatGPT image feedback** in Snapgent's **Switch AI and options** menu. The browser and desktop extensions keep this setting off by default. The existing MCP bridge transports images. The adapter accepts PNG, JPEG and WebP, with an extension limit of four images of up to 8 MiB each. ChatCMD's `fs_view_image` emits PNG only. ChatGPT applies its own upload, account and model limits.
 
-The provider uses one upload-input change event, unique attachment filenames, named preview confirmation, and one send click. Missing or ambiguous confirmation produces an error rather than retrying. A provider limit stops the attempt. Existing manual attachments are checked before editing the composer where detectable. Selectors are conservative and are not yet validated against the live provider. Never assume the model saw a picture based solely on metadata or DOM confirmation.
+## Composer correction
 
-## Offline checks
+The old adapter guessed a hidden file input and required exactly one image-capable candidate when its historical test ID was absent. Live Chrome exposed three eligible inputs in the active form. The visible **Add photos** control chose the general files input, whose test ID was absent. The live transcript also used `data-message-role` and a stable element ID for each turn. That layout escaped the old turn detector even when ChatGPT had rendered a submitted image.
 
-Run `node snapgent-extension/test-chatgpt.js` and the other `snapgent-extension/test*.js` scripts. Simulated checks cover default-off, explicit opt-in, repeated distinct images, missing attachment confirmation, ambiguous send confirmation, and provider-limit errors. Syntax checks cover both provider copies and changed JavaScript. These checks do not upload anything to ChatGPT.
+The adapter uses ChatGPT's normal file-drop flow. It types the tool result first, dispatches one drop on the active composer, and waits for each named image to load and for the upload indicator to clear. Chrome showed that the Send button can become enabled during upload. The adapter clicks Send once and looks for each image on a new user turn with a stable ID. An existing manual attachment, a changed draft or composer, cancellation, disabled consent, and upload or confirmation failures stop the attempt. Uncertain submissions require inspection before resuming.
 
-## Manual activation and acceptance
+## Diagnostics
 
-Do not reload the running extension or restart the active bridge/server without explicit user approval. Use an isolated test browser profile with the matching ChatCMD build and a single test extension, then explicitly enable image feedback. Confirm the new tool is authorized and visible. Capture a project screenshot, submit it through the tool, and verify the model can identify image-only details. Repeat with distinct randomized blind images and actual First Money Music screenshots. If upload or send confirmation is missing, inspect manually; do not retry automatically. Respect normal provider restrictions and quotas. Disable the feature and return to the previous extension on failure. No main-branch merge or live activation has occurred.
+Open **Switch AI and options → Image delivery diagnostics** in the tab that ran the tool. The panel shows the latest attempt's stages and image counts, including whether the composer handled the drop, whether previews loaded, and whether a new user turn displayed the images. Image delivery errors also appear in the Snapgent banner. The panel is stored in memory for that tab and omits image payloads, paths, conversation text and credentials.
 
-## Composer delivery correction
+`image.deliveryConfirmed` records a visible attachment on a new user turn. Use a blind image test to verify model interpretation.
 
-The first live fixture reached the floating Snapgent preview, but the model received only textual metadata. This establishes transport reception, not attachment delivery. Source review identified a regression risk: the adapter required the historical `upload-photos-input` test ID, and the original offline test simulated only that selector. The correction selects an eligible image input inside the active composer, preferring the known test ID and refusing ambiguous or missing candidates. Filename-based preview and submitted-turn confirmation remain mandatory. Consent and provider errors are checked again before upload and send. Existing limits and the single-attempt rule remain unchanged.
+## Verification
 
-Both provider copies pass syntax checks; all five browser-extension test scripts pass, including the renamed-input, missing-input and ambiguous-input simulations. The precise cause in the live DOM is not yet established. The active extension has not been reloaded. On separately approved activation, inspect the existing `zs-diag-log` breadcrumbs for `images.stashed`, `images.consumed`, `submit.typeAndSend`, `image.inputSelected`, `image.uploadDispatched`, `image.previewConfirmed`, `image.sendAttempt` and `image.deliveryConfirmed`, or their corresponding failure events. Stop after an uncertain attempt. A fresh blind fixture must be visible to the model before marking end-to-end verification passed.
+- Chrome, Nov. 24, 2026. ChatGPT's **Add photos** menu attached and submitted a randomized PNG. The model returned all three color and shape pairs in the correct order (red diamond, blue triangle, orange circle).
+- A separate Chrome composer test sent a distinct PNG via the file-drop event. The composer rendered a preview, the conversation displayed the attachment, and the model returned all three pairs in order (red triangle, green cross, blue diamond). The prompt and filename contained no answers.
+- An authenticated, approved `fs_view_image` call returned a byte-for-byte PNG through the separate Python bridge. The test agent rejected a tool outside its allowlist.
+- The isolated unpacked extension reached the ChatCMD conversation approval gate and returned the denial normally after the approval window expired. A fresh attempt reached ChatGPT's guest sign-in requirement before sending the fixture request. Google rejected sign-in in the isolated Chrome test window. A signed-in run through autonomous tool dispatch and attachment delivery remains open.
+- All five `snapgent-extension/test*.js` scripts and the seven bridge unit tests passed. The browser regressions cover distinct attachment names, waiting for ongoing uploads, protecting manual drafts, cancellation, opt-in, provider errors and refusing to retry ambiguous sends.
+
+Browser captures are in the companion ChatCMD worktree under `target/live-visual-feedback/verification-2026-11-24/`.
+
+## Activation and acceptance
+
+Use an isolated browser profile, one extension, and separate ChatCMD and bridge instances. Confirm that the MCP agent is authorized for `fs_view_image` and approve the conversation and read using ChatCMD's normal controls. Opt in to image feedback and use a synthetic PNG in the authorized test workspace. Ask the model to describe randomized details, compare the answer with the locally retained key, and repeat on a distinct image if the provider permits. Check the project screenshot flow only with consent to send the project screenshots. After a provider limit, sign-in restriction, or uncertain send, inspect the provider's current state before another attempt. Keep the active installation and main branches available for review.

@@ -453,6 +453,7 @@ button.zs-site-opt:hover .zs-site-go { opacity: 1; transform: translateX(0); }
 }
 .zs-mcp-pop-close:hover { background: rgba(255, 255, 255, 0.08); color: #ededf0; }
 .zs-mcp-pop-note { padding: 10px 14px 4px; font-size: 10.5px; color: #82828b; line-height: 1.45; }
+#zs-image-trace { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .zs-mcp-pop-list { padding: 6px 10px 12px; overflow-y: auto; }
 .zs-mcp-row {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;

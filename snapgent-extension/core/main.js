@@ -49,7 +49,21 @@
   // DOM node for a main-world inspector). Each entry carries a turn snapshot.
   const ZS_DIAG_MAX = 300;
   const _diag = [];
+  const imageTrace = [];
+  function imageTraceText() {
+    return imageTrace.join("\n") || "No image feedback attempted in this tab.";
+  }
   function diag(event, data) {
+    if (P.setVisionEnabled && (event.startsWith("image.") ||
+        (event.startsWith("images.") && data?.count) || (event === "submit.typeAndSend" && data?.hasImages))) {
+      if (event === "images.stashed") imageTrace.length = 0;
+      const count = data?.count ? ` (${data.count})` : "";
+      const drop = typeof data?.handled === "boolean" ? (data.handled ? " [drop handled]" : " [drop unhandled]") : "";
+      imageTrace.push(`${new Date().toLocaleTimeString()} ${event}${count}${drop}`);
+      if (imageTrace.length > 16) imageTrace.shift();
+      const trace = document.getElementById("zs-image-trace");
+      if (trace) trace.textContent = imageTraceText();
+    }
     const snap = { ...P.snapshot(), gen: P.isGenerating(), run: A.running };
     const e = { t: Date.now(), iso: new Date().toISOString().slice(11, 23), event,
                 data: data || null, snap };
@@ -399,7 +413,7 @@
         }
         await jitterBeforeSend();
         diag("submit.typeAndSend", { hasImages: !!(images && images.length) });
-        await P.typeAndSend(text, images);
+        await P.typeAndSend(text, images, () => !A.stop);
         if (images?.length && P.setVisionEnabled) messageSent = true; // provider verified the exact new turn
         // Re-arm the pre-hide window NOW that typeAndSend has returned (the send
         // was just clicked, so our result turn is about to render). The initial
@@ -1783,7 +1797,7 @@
       }
     } catch (e) {
       diag("loop.error", { msg: String((e && e.message) || e) });
-      ui.banner("warn", "Internal loop error", String((e && e.message) || e));
+      ui.banner("warn", e?.imageFeedback ? "Image feedback stopped" : "Internal loop error", String((e && e.message) || e));
     } finally {
       A.running = false;
       A.stop = false;
@@ -3662,8 +3676,10 @@
            <div class="zs-sec-label zs-sec-label-row"><span>Switch AI</span><span><button id="zs-skills-settings" class="zs-gear" title="Skills" aria-label="Skills">&#9733;</button><button id="zs-mcp-settings" class="zs-gear" title="MCP settings" aria-label="MCP settings">&#9881;</button></span></div>
            <div class="zs-site-grid">${sites}</div>
          </section>
-         ${P.setVisionEnabled ? `<section class="zs-menu-sec"><label><input type="checkbox" id="zs-vision-enabled" ${P.supportsVision ? "checked" : ""}> Enable ChatGPT image feedback</label><div class="zs-mcp-pop-note">Uses normal provider upload limits. Off by default.</div></section>` : ""}
+         ${P.setVisionEnabled ? `<section class="zs-menu-sec"><label><input type="checkbox" id="zs-vision-enabled" ${P.supportsVision ? "checked" : ""}> Enable ChatGPT image feedback</label><div class="zs-mcp-pop-note">Uses normal provider upload limits. Off by default.</div><details><summary>Image delivery diagnostics</summary><pre id="zs-image-trace"></pre></details></section>` : ""}
          ${skillsSectionHtml()}`;
+      const trace = menuEl.querySelector("#zs-image-trace");
+      if (trace) trace.textContent = imageTraceText();
       const visionBox = menuEl.querySelector("#zs-vision-enabled");
       if (visionBox) visionBox.addEventListener("change", () => {
         P.setVisionEnabled(visionBox.checked);

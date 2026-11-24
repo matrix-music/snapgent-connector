@@ -234,6 +234,13 @@ ok("DilResponseRoot reply text is readable", dilReplyText.includes('"command":"l
 const dilReplyCalls = ZSParse.parseToolCalls(dilReplyText);
 ok("command in DilResponseRoot reply is parsed", dilReplyCalls.length === 1 && dilReplyCalls[0].tool === "list_commands");
 
+const octaneReply = Object.assign(el("li", {attrs:{"data-message-role":"assistant"}}), {id:"octane-reply"});
+octaneReply.querySelectorAll = selector => selector === 'section[aria-label="DIL content"]'
+  ? [el("section", {}, ["Red triangle, green cross, blue diamond."])] : [];
+messageNodes = [octaneReply];
+ok("Octane reply is identified and read", P.lastAssistantId() === "octane-reply" &&
+  P.readAssistant().reply === "Red triangle, green cross, blue diamond.");
+
 // ChatGPT's newer compact composer is a controlled textarea instead of the
 // ProseMirror #prompt-textarea. It still needs the bar anchor and send path.
 const composerForm = { closest: () => null };
@@ -273,47 +280,75 @@ ok("mobile textarea text can be read", P.editorText() === "");
   ok("vision can be explicitly enabled", P.supportsVision === true);
   const originalQueryAll = document.querySelectorAll;
   let uploads = 0, sends = 0, names = [], alerts = [], mode = "success";
-  let inputMode = "named";
+  let current = true;
   global.DataTransfer = class { constructor() { this.files = []; this.items = { add: f => this.files.push(f) }; } };
+  global.DragEvent = class { constructor(type, options) { this.type = type; Object.assign(this, options); } };
   if (!global.File) global.File = require("node:buffer").File;
   if (!global.crypto) global.crypto = require("node:crypto").webcrypto;
-  const preview = name => el("img", {attrs:{alt:name}}, []);
-  composerForm.querySelector = () => null;
-  const makeInput = testid => ({ files: [], disabled: false, getAttribute(name) { return name === "accept" ? "image/*" : name === "data-testid" ? testid : null; }, dispatchEvent(event) { uploads++; if (event.type !== "change") throw Error("unexpected upload event"); names = mode === "missing" ? [] : this.files.map(f => f.name); this.files = []; } });
-  const namedInput = makeInput("upload-photos-input"), renamedInput = makeInput("new-attachment-input"), otherInput = makeInput("other-input");
-  composerForm.querySelectorAll = selector => selector === 'input[type="file"]' ? (inputMode === "named" ? [namedInput] : inputMode === "renamed" ? [renamedInput] : inputMode === "ambiguous" ? [renamedInput, otherInput] : []) : names.map(preview);
+  const preview = name => Object.assign(el("img", {attrs:{alt:name}}), { complete: true, naturalWidth: 660 });
+  composerForm.contains = node => node === submitControl;
+  composerForm.querySelector = selector => {
+    if (mode === "manual" && selector.includes("data-composer-remove-image")) return {};
+    if (mode === "uploading" && selector.includes("data-composer-image-upload-status")) return {};
+    return null;
+  };
+  composerForm.querySelectorAll = selector => selector === "img" ? names.map(preview) : [];
+  composerForm.dispatchEvent = event => {
+    if (event.type !== "drop") throw Error("expected exactly one file drop");
+    uploads++;
+    names = mode === "missing" ? [] : event.dataTransfer.files.map(f => f.name);
+    if (mode === "cancel") current = false;
+    return false;
+  };
   document.querySelectorAll = selector => selector.includes('role="alert"') ? alerts : originalQueryAll(selector);
-  submitControl.click = () => { sends++; mobileComposer.value = ""; if (mode === "success") messageNodes.push(el("div", {attrs:{"data-message-author-role":"user","data-message-id":`image-turn-${sends}`}}, names.map(preview))); names = []; };
+  submitControl.click = () => {
+    sends++;
+    mobileComposer.value = "";
+    if (mode === "success") {
+      const item = el("li", {attrs:{"data-message-role":"user"}}, names.map(preview));
+      item.id = `image-turn-${sends}`;
+      messageNodes.push(item);
+    }
+    names = [];
+  };
   const image = {mimeType:"image/png",data:"iVBORw0KGgo="};
   const clock = Date.now;
   let simulated = clock();
-  Date.now = () => simulated += 1000;
+  Date.now = () => simulated += 8000;
+  const fails = async (expected, ...args) => {
+    try { await P.typeAndSend(...args); } catch (error) { return error.imageFeedback && error.message.includes(expected); }
+    return false;
+  };
   try {
     messageNodes = [];
     await P.typeAndSend("image result", [image]);
-    ok("image attaches once and sends once", uploads === 1 && sends === 1);
-    inputMode = "renamed";
+    ok("image drops once and sends once", uploads === 1 && sends === 1);
     await P.typeAndSend("next image result", [image]);
-    ok("second image gets a separate confirmed turn", uploads === 2 && sends === 2 && messageNodes.length === 2);
-    let failed = false;
-    inputMode = "ambiguous";
-    try { await P.typeAndSend("ambiguous input", [image]); } catch { failed = true; }
-    ok("ambiguous composer inputs never upload or send", failed && uploads === 2 && sends === 2);
-    inputMode = "absent"; failed = false;
-    try { await P.typeAndSend("absent input", [image]); } catch { failed = true; }
-    ok("missing composer input never uploads or sends", failed && uploads === 2 && sends === 2);
-    inputMode = "renamed"; mode = "missing"; failed = false;
-    try { await P.typeAndSend("missing attachment", [image]); } catch { failed = true; }
-    ok("unconfirmed attachment never sends", failed && uploads === 3 && sends === 2);
-    mode = "unconfirmed"; failed = false;
-    try { await P.typeAndSend("unconfirmed delivery", [image]); } catch { failed = true; }
-    ok("unconfirmed delivery throws without retry", failed && uploads === 4 && sends === 3);
-    alerts = [{textContent:"Upload quota exceeded"}]; failed = false;
-    try { await P.typeAndSend("quota failure", [image]); } catch { failed = true; }
-    ok("provider limit prevents upload and send", failed && uploads === 4 && sends === 3);
-    alerts = []; P.setVisionEnabled(false); failed = false;
-    try { await P.typeAndSend("disabled vision", [image]); } catch { failed = true; }
-    ok("disabled vision prevents upload and send", failed && uploads === 4 && sends === 3);
+    ok("second result has a distinct named image on a new user turn",
+      uploads === 2 && sends === 2 && messageNodes.length === 2 &&
+      messageNodes[0].querySelector("img").getAttribute("alt") !== messageNodes[1].querySelector("img").getAttribute("alt"));
+    mode = "manual";
+    ok("existing manual attachment protects the draft",
+      await fails("already has an attachment", "existing attachment", [image]) && uploads === 2 && sends === 2);
+    mode = "missing";
+    ok("missing preview prevents sending",
+      await fails("ready image attachment", "missing attachment", [image]) && uploads === 3 && sends === 2);
+    mode = "uploading";
+    ok("an enabled Send cannot submit an image while it is still uploading",
+      await fails("ready image attachment", "upload pending", [image]) && uploads === 4 && sends === 2);
+    mode = "cancel";
+    ok("stopping the active run prevents sending an uploaded image",
+      await fails("canceled", "stop during upload", [image], () => current) && uploads === 5 && sends === 2);
+    mode = "unconfirmed";
+    ok("unconfirmed submission throws without retry",
+      await fails("new user turn", "unconfirmed delivery", [image]) && uploads === 6 && sends === 3);
+    alerts = [{textContent:"Upload quota exceeded"}];
+    ok("provider limit prevents upload and send",
+      await fails("upload blocked", "quota failure", [image]) && uploads === 6 && sends === 3);
+    alerts = [];
+    P.setVisionEnabled(false);
+    ok("disabled vision prevents upload and send",
+      await fails("upload blocked", "disabled vision", [image]) && uploads === 6 && sends === 3);
   } finally { Date.now = clock; }
 
 })().catch((error) => {
