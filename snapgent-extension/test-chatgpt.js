@@ -243,7 +243,7 @@ ok("Octane reply is identified and read", P.lastAssistantId() === "octane-reply"
 
 // ChatGPT's newer compact composer is a controlled textarea instead of the
 // ProseMirror #prompt-textarea. It still needs the bar anchor and send path.
-const composerForm = { closest: () => null };
+const composerForm = { closest: () => null, querySelector: () => null };
 const mobileComposer = Object.assign(new StubTextArea(), {
   tagName: "TEXTAREA",
   id: "mobile-composer-prompt",
@@ -275,6 +275,35 @@ ok("mobile textarea text can be read", P.editorText() === "");
   ok("mobile composer relocks after sending", mobileComposer.getAttribute("readonly") === "");
   P.setInputLock(false);
   ok("mobile composer unlocks after startup", mobileComposer.getAttribute("readonly") === null);
+
+  const nativeSend = Object.assign(el("button", { attrs: { "aria-label": "Send" } }), {
+    offsetParent: {},
+    disabled: false,
+    click() { mobileComposer.value = ""; },
+  });
+  const legacySend = submitControl;
+  submitControl = null;
+  composerForm.querySelector = (selector) => selector === 'button[aria-label="Send"]' ? nativeSend : null;
+  await P.typeAndSend("ordinary tool result");
+  ok("text feedback uses the active composer's Send button", mobileComposer.value === "");
+
+  let clickHandler;
+  const addListener = document.addEventListener;
+  document.addEventListener = (type, listener) => {
+    if (type === "click") clickHandler = listener;
+  };
+  let userSends = 0;
+  P.installSendHooks({
+    isBlocked: () => false,
+    isStarted: () => true,
+    onUserMessage: () => { userSends++; },
+  });
+  document.addEventListener = addListener;
+  clickHandler({ target: el("button", { attrs: { "aria-label": "Send" } }) });
+  ok("a Send button outside the active composer does not start the loop", userSends === 0);
+  clickHandler({ target: nativeSend });
+  ok("clicking the active composer's Send button starts the loop", userSends === 1);
+  submitControl = legacySend;
   ok("vision defaults off", P.supportsVision === false);
   P.setVisionEnabled(true);
   ok("vision can be explicitly enabled", P.supportsVision === true);
@@ -385,6 +414,19 @@ ok("mobile textarea text can be read", P.editorText() === "");
   const legacy = el("div", { attrs: { "data-message-id": "uuid-legacy" } });
   ok("itemKey still honours the legacy data-message-id",
     P.itemKey(legacy) === "uuid-legacy");
+  const makeReply = (id) => el("div", {
+    class: "DilResponseRoot-HfQrEh",
+    attrs: { "data-dil-message-id": id },
+  });
+  messageNodes = [makeReply("previous-assistant")];
+  const beforeCount = P.assistantCount();
+  const beforeId = P.lastAssistantId();
+  messageNodes = [makeReply("new-assistant")];
+  ok("a newly mounted DIL reply advances the last assistant ID at a constant count",
+    P.assistantCount() === beforeCount && beforeId === "previous-assistant" &&
+    P.lastAssistantId() === "new-assistant");
+  messageNodes = [makeReply("new-assistant")];
+  ok("remounting the same DIL reply preserves its key", P.lastAssistantId() === "new-assistant");
   ok("itemKey returns null only when neither attribute exists",
     P.itemKey(el("div", {})) === null);
 }

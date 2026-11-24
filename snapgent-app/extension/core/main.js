@@ -2324,11 +2324,13 @@
   //  expandable body, themed by tool category and execution state)
   // ════════════════════════════════════════════════════════════════════════
 
+  const findItemChip = (item) => item.querySelector(P.chipSelector || ".zs-chip");
+
   // Strip every trace of our decoration from a node. Needed because sites
   // virtualize (recycle) turn nodes: a node that was a command/result card can
   // be reused to render unrelated text.
   function resetDecoration(item) {
-    const chip = item.querySelector(".zs-chip");
+    const chip = findItemChip(item);
     if (chip) chip.remove();
     item.classList.remove("zs-hidden");
     item.querySelectorAll(".zs-tool-hide").forEach((e) => e.classList.remove("zs-tool-hide"));
@@ -2346,7 +2348,7 @@
     // Core renderer. opts: {label, detail, body, category, phase, cls, whole}
     chip(item, opts) {
       const { label, detail = "", body = "", category = "tool", phase, cls, whole } = opts;
-      let chip = item.querySelector(".zs-chip");
+      let chip = findItemChip(item);
       const hasBody = !!body;
       // While a command streams, the site re-renders the raw block on every token
       // and we get called on nearly every sweep. If what we'd draw is identical,
@@ -2434,7 +2436,7 @@
     ensureOwnedChip(item) {
       const opts = item.__zsChip;
       if (!opts) return;
-      const chipEl = item.querySelector(".zs-chip");
+      const chipEl = findItemChip(item);
       const chipGone = !chipEl;
       let rawVisible = false;
       if (!opts.whole) {
@@ -2503,7 +2505,7 @@
       // .zs-tool-hide classes are wiped while the dataset flags on the turn
       // element itself survive. So "already decorated" must always be
       // double-checked against the chip actually being present in the DOM.
-      const chipGone = !item.querySelector(".zs-chip");
+      const chipGone = !findItemChip(item);
 
       // 1a. A mid-session RE-STATEMENT of the system prompt. Checked before the
       //     bootstrap branch because it carries SYS_MARKER too (that marker is
@@ -2796,7 +2798,7 @@
         // phase-only guard would otherwise freeze it on the generic wrench.
         const nm = ZSParse.toolNameFromText(txt);
         const cat = A.imageTools.has(bareToolName(nm)) ? "screen" : undefined;
-        const chipNow = item.querySelector(".zs-chip");
+        const chipNow = findItemChip(item);
         const catStale = cat === "screen" && chipNow && !chipNow.classList.contains("cat-screen");
         // Chip drift for chipAppend providers (Kimi): the RUN chip is painted by
         // the SWEEP (owned=false, no zloop) until the loop takes over at
@@ -2851,7 +2853,7 @@
         item.dataset.zStopped === "1" ||
         (A.userStopped && item === P.lastAssistant());
       if (haltedTurn && P.isAssistantItem(item) && item.dataset.zphase !== "err"
-          && item.querySelector(".zs-chip")) {
+          && findItemChip(item)) {
         const tx = item.querySelector(".zs-chip-tx");
         const name = ZSParse.toolNameFromText(txt) || (tx && tx.textContent) || "tool";
         this.toolBox(item, name, "err", "stopped", false);
@@ -2865,7 +2867,7 @@
 
       // 4. Plain text turn. If this node still wears decoration (a recycled
       //    virtualized node), strip it so we never hide genuine content.
-      if (item.dataset.zs || item.dataset.zphase || item.querySelector(".zs-chip")) {
+      if (item.dataset.zs || item.dataset.zphase || findItemChip(item)) {
         // Tracker: a decorated node re-classified as PLAIN TEXT (virtualized
         // node recycled, or the turn's command text vanished) - its decoration
         // (chip + zStopped marker) is stripped here. If a chip "un-settles"

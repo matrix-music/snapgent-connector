@@ -425,15 +425,14 @@ const ZSProvider = (() => {
   // a monotonic number, so the core's numeric "old id" shortcut simply doesn't
   // apply here (Number(uuid) is NaN and that guard is skipped) - the
   // settled-history guard covers the same case provider-agnostically.
-  // The 2026-11 turn no longer carries data-message-id (measured live: 0 turns,
-  // 0 descendants), so the key MUST come from data-turn-key. Without it itemKey
-  // returned null and core's turnKey() fell back to a POSITIONAL index, which
-  // collides as soon as scrolling changes the rendered window - the guard then
-  // misses and the resume watchdog re-fires a historical tool.
+  // The paired layout exposes data-turn-key on the outer turn and
+  // data-dil-message-id on the nested assistant reply. The reply needs its own
+  // key so replacing an older mounted turn cannot make a new answer look stale.
   const itemKey = (item) => {
     if (!item || !item.getAttribute) return null;
     return item.getAttribute("data-turn-key")
       || item.getAttribute("data-message-id")
+      || (isDilReply(item) ? item.getAttribute("data-dil-message-id") : null)
       || (item.getAttribute("data-message-role") ? item.id : null)
       || null;
   };
@@ -556,8 +555,12 @@ const ZSProvider = (() => {
     b.getAttribute("data-testid") === "stop-button" ||
     /\b(stop|interrompre|arrêter)\b/i.test(b.getAttribute("aria-label") || "")
   );
+  const composerSendButton = (form = getEditor()?.closest("form")) =>
+    form?.querySelector('button[aria-label="Send"]') || null;
   const submitButton = () => {
-    const b = document.querySelector(S.submitBtn);
+    const legacy = document.querySelector(S.submitBtn);
+    if (legacy && legacy.offsetParent !== null) return legacy;
+    const b = composerSendButton();
     return b && b.offsetParent !== null ? b : null;
   };
   const sendButton = () => {
@@ -1045,7 +1048,7 @@ const ZSProvider = (() => {
       diag("image.previewConfirmed", { count: names.length });
 
       const readySend = () => {
-        const button = box.querySelector('button[aria-label="Send"]') || sendButton();
+        const button = composerSendButton(box) || sendButton();
         return button && box.contains(button) && button.offsetParent !== null && !button.disabled &&
           button.getAttribute("aria-disabled") !== "true" ? button : null;
       };
@@ -1156,8 +1159,9 @@ const ZSProvider = (() => {
         // role, so a stop click would otherwise read as a user send.
         const stop = t && t.closest && t.closest(S.stopBtn);
         if (stop) { handlers.onNativeStop(); return; }
-        const btn = t && t.closest && t.closest(S.submitBtn);
-        if (!btn || isStopBtn(btn)) return;
+        const btn = t && t.closest && t.closest("button");
+        if (!btn || isStopBtn(btn) ||
+            !(btn.matches(S.submitBtn) || btn === composerSendButton())) return;
         if (handlers.isBlocked()) return;
         // Same as the keydown path: nudge, never block (see the comment there).
         if (!handlers.isStarted()) {
@@ -1268,6 +1272,8 @@ const ZSProvider = (() => {
     // placed inside it. Anchor chips at the turn-element level (the stable
     // data-message-author-role div), where they survive those re-renders.
     chipAtItemLevel: true,
+    // A user turn can contain a separate assistant item with its own chip.
+    chipSelector: ":scope > .zs-chip",
     // ChatGPT's turn elements are semantic (data-message-author-role) and carry
     // a stable id, so the core's "has THIS send produced its reply turn yet?"
     // gate is trustworthy here - it keys off lastAssistantId, which survives the
@@ -1282,7 +1288,7 @@ const ZSProvider = (() => {
       if (d) diag = d;
       // Version beacon: stamp the loaded build onto <html> so a reload can be
       // confirmed from the page (read document.documentElement.dataset.zsGptVer).
-      try { document.documentElement.setAttribute("data-zs-gpt-ver", "2026-08-13_cmtap+toolkey"); } catch {}
+      try { document.documentElement.setAttribute("data-zs-gpt-ver", "2026-11-24_chatgpt-turn-id"); } catch {}
     },
     // turns
     allItems, isUserItem, isAssistantItem, itemText, classifyText,
