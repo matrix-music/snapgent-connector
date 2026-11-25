@@ -43,6 +43,11 @@ function harness(root) {
     const document = { hidden: false };
     const ensureTools = async () => A.toolList;
     const diag = () => {};
+    const systemPrompt = () => "System instructions with fenced JSON";
+    let sysDue = true;
+    const sysResendDue = () => sysDue;
+    const sinceLastSys = () => ({ users: 0, results: 12 });
+    const resetSysCount = () => { sysDue = false; };
     const previewed = [];
     const ui = { showImages: images => previewed.push(images), banner: () => {} };
     const setTimeout = (callback, ms) => { if (ms < 2000) queueMicrotask(callback); };
@@ -71,9 +76,10 @@ function harness(root) {
     ${companion}
     ${functionSource(core, "knownTool")}
     ${functionSource(core, "runTool")}
+    ${functionSource(core, "withSysResend")}
     const call = (tool, args = {}) => runTool({tool, arguments: args});
     return {
-      call, sent, previewed, A, ZS, ZSParse, P,
+      call, sent, previewed, A, ZS, ZSParse, P, withSysResend,
       grant: () => { browseConsent = {conversation}; },
       revoke: () => revokeBrowseCompanion(),
       navigate: key => { conversation = key; },
@@ -119,6 +125,9 @@ async function verify(root, browser) {
   assert.equal(previewed.length, 3);
   assert.match(ZS.buildSystemPrompt({ targetServer: "chatcmd", browseCompanion: true }), /list_commands with server "browse"/);
   assert.doesNotMatch(ZS.buildSystemPrompt({ targetServer: "chatcmd" }), /Browse/);
+  assert.equal(h.withSysResend("Exact image caption", true), "Exact image caption");
+  assert.match(h.withSysResend("Text feedback", false), /System instructions with fenced JSON/);
+  assert.equal(h.withSysResend("Another text result", false), "Another text result");
 
   h.navigate("/c/another");
   assert.match(await call("browse/tabs"), /Only the selected target/);

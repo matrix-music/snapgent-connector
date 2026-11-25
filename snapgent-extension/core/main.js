@@ -1844,7 +1844,7 @@
           bumpSys("results");
           // Ride the system-prompt re-statement out on this result if one is due
           // and it fits (see withSysResend - the result itself is never trimmed).
-          toSend = withSysResend(toSend);
+          toSend = withSysResend(toSend, hasImages);
           const images = A.pendingImages;
           A.pendingImages = null;
           diag("images.consumed", { count: images ? images.length : 0 });
@@ -2424,8 +2424,10 @@
   // truncated to make room: the passenger is dropped and the flag stays raised,
   // so it rides the next result instead. A tool result the model is waiting on
   // is always worth more than a reminder.
-  function withSysResend(text) {
-    if (!sysResendDue()) return text;
+  function withSysResend(text, hasImages) {
+    // The transcript reformats the reminder's Markdown fences, which breaks
+    // exact caption matching. Keep it due for the next text-only result.
+    if (hasImages || !sysResendDue()) return text;
     const prompt = systemPrompt();
     const rider =
       "\n\n────────────────────────────────\n" +

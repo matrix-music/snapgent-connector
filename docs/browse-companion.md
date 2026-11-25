@@ -24,8 +24,18 @@ Start or reload the bridge configuration at an appropriate time. Browse uses the
 
 ## Verification
 
-Automated tests exercise both Snapgent bundles with Browse off and on, discovery, prefix collisions, consecutive per-server routing, unrelated-server refusals, revocation, navigation, a safe retry, and native image results. The existing JavaScript and Python suites also pass. A loopback smoke test loaded both real MCP catalogs, routed a qualified request to the installed Browse process and rejected that request under the ChatCMD server ID. The isolated Chrome build uses a separate unpacked extension ID and a different loopback bridge port. Live acceptance is pending isolated activation and an authenticated Testing tab.
+Automated tests exercise both Snapgent bundles with Browse off and on, discovery, prefix collisions, consecutive per-server routing, unrelated-server refusals, revocation, navigation, a safe retry, native image results, and reminder deferral. All JavaScript suites and 18 Python tests passed. The isolated bridge refused a Browse command sent under the ChatCMD server ID, and ChatCMD refused a command outside its test agent’s tool allowlist.
+
+On November 25, 2026, the existing authenticated Testing tab used a separate unpacked extension ID, a URL-scoped content script, and an isolated loopback bridge and ChatCMD database. Four repeat trials passed.
+
+- Two Browse-disabled trials each completed six consecutive calls. Discovery showed only ChatCMD. Both approved ChatCMD PNGs appeared as conversation attachments, and ChatGPT identified all their blind color and shape pairs in order.
+- Two Browse-enabled trials each completed eight consecutive calls while ChatCMD stayed selected. ChatGPT discovered both servers, navigated to a synthetic fixture and read its title through Browse, then correctly described both the Browse screenshot and the ChatCMD PNG. Each image was confirmed on a submitted conversation turn.
+- After revocation, a Browse call was refused and discovery showed only ChatCMD. The four repeat trials and the revocation check had no false empty replies, watchdog restarts, or stalls.
+
+The first mixed trial exposed an exact-caption confirmation failure. ChatGPT rendered the periodic system reminder’s Markdown fences differently when the reminder accompanied an image. The screenshot reached the conversation, but Snapgent timed out on confirmation. The corrected build defers the reminder to the next text-only result. A repeat trace shows two successful image confirmations followed by the reminder on a later text result. The response detection, composer and submission routines were not changed.
+
+The five repeat traces and the reminder-order evidence are stored locally in the companion ChatCMD checkout under `target/live-visual-feedback/browse-companion-2026-11-25/`.
 
 ## Rollback
 
-Use **Disable Browse** to revoke the current conversation’s grant. Remove only the `browse` bridge entry and reload the bridge configuration to remove Browse from Snapgent’s catalog. Keep the existing Browse extension and relay installed for other clients. To roll back the Snapgent source, use the previous verified build at `4129054`. For an isolated test installation, remove its unpacked extension and stop its test bridge and ChatCMD server. The normal Snapgent checkout, settings and ChatCMD database are separate.
+Use **Disable Browse** to revoke the current conversation’s grant. Remove only the `browse` bridge entry and reload the bridge configuration to remove Browse from Snapgent’s catalog. Keep the existing Browse extension and relay installed for other clients. To roll back the Snapgent source, use the previous verified build at `4129054`. Keep the original extension installed during a temporary swap so Chrome retains its settings. For an isolated test installation, remove its unpacked extension and stop its test bridge and ChatCMD server. The normal Snapgent checkout, settings and ChatCMD database are separate.
