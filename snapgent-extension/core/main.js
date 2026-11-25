@@ -970,7 +970,12 @@
   // cannot re-add a prefix it never had. Compare bare-to-bare in BOTH directions.
   const bareKey = (n) => String(n || "").split("/").pop().split(".").pop();
   function knownTool(name) {
-    if (!name || !A.toolNames.size) return false;
+    if (!name) return false;
+    if (selectedTargetId === "chatcmd" && name.startsWith(`${BROWSE_SERVER}/`)) {
+      return !!browseCompanionScope() && A.toolList.some((tool) =>
+        tool.server === BROWSE_SERVER && browseToolName(tool) === name);
+    }
+    if (!A.toolNames.size) return false;
     if (A.toolNames.has(name) || A.toolNames.has(bareToolName(name))) return true;
     const b = bareKey(name);
     for (const t of A.toolNames) if (bareKey(t) === b) return true;
@@ -1009,6 +1014,42 @@
 
   // How long a fetched catalogue stays good enough to reuse without a round trip.
   const TOOLS_TTL_MS = 30000;
+
+  const BROWSE_SERVER = "browse";
+  let browseConsent = null;
+
+  let browseCompanionBlocked = false;
+  chrome.storage.onChanged?.addListener((changes, area) => {
+    if (area !== "local" || !changes[MCP_ENABLED_KEY]) return;
+    const flags = changes[MCP_ENABLED_KEY].newValue;
+    browseCompanionBlocked = flags?.chatcmd === false || flags?.browse === false;
+    if (browseCompanionBlocked) revokeBrowseCompanion();
+  });
+
+  function browseFeedbackInProgress() {
+    return A.running && A.toolName?.startsWith(`${BROWSE_SERVER}/`) && (A.toolRunning || A.injecting);
+  }
+
+  function revokeBrowseCompanion() {
+    if (browseConsent && browseFeedbackInProgress()) A.stop = true;
+    browseConsent = null;
+  }
+
+  function browseCompanionAvailable() {
+    return P.id === "chatgpt" && selectedTargetId === "chatcmd" && !browseCompanionBlocked &&
+      isMcpEnabled("chatcmd") && isMcpEnabled(BROWSE_SERVER) &&
+      !!A.bridge?.servers?.some((server) => server.id === BROWSE_SERVER && server.alive);
+  }
+
+  function browseCompanionScope() {
+    return browseConsent && browseConsent.conversation === P.conversationKey() &&
+      browseCompanionAvailable() ? browseConsent : null;
+  }
+
+  function browseToolName(tool) {
+    const prefix = `${BROWSE_SERVER}/`;
+    return tool.name.startsWith(prefix) ? tool.name : prefix + tool.name;
+  }
 
   function activeTools() {
     if (!isMcpEnabled(selectedTargetId)) return [];
@@ -1136,10 +1177,10 @@
     // merged tool count - a dead server must not borrow another's numbers).
     if (name === "list_mcp_servers") {
       await ensureTools();
-      // Isolation: the AI only ever sees the server selected in the dropdown (and only
-      // if its toggle is on). Other servers, enabled or not, are invisible to it.
+      const companion = browseCompanionScope();
       const servers = ((A.bridge && A.bridge.servers) || [])
-        .filter((sv) => sv.id === selectedTargetId && isMcpEnabled(sv.id));
+        .filter((sv) => isMcpEnabled(sv.id) &&
+          (sv.id === selectedTargetId || (companion && sv.id === BROWSE_SERVER)));
       const lines = servers.length
         ? servers.map((sv) => {
             const label = sv.id === "vscode"
@@ -1151,23 +1192,23 @@
       return (
         `Output of 'list_mcp_servers':\n` +
         `Connected MCP servers (${lines.length}):\n${lines.join("\n")}\n` +
-        `Use list_commands with a "server" param (one of the ids above) to see that server's exact commands. Without "server", list_commands defaults to "${selectedTargetId}".`
+        `Use list_commands with a "server" param (one of the ids above) to see that server's exact commands. Without "server", list_commands defaults to "${selectedTargetId}".` +
+        (companion ? ZS.browseCompanionInstructions : "")
       );
     }
-    // Virtual command: list available commands with full details. Defaults to
-    // the primary Roblox server - a DIFFERENT server's tools only ever show up
-    // if the model explicitly asks via {"server": "<id>"} (see list_mcp_servers).
+    // The default catalog stays on the selected target. Browse requires both
+    // the user's conversation opt-in and an explicit server argument.
     if (name === "list_commands" || name === "list_tools") {
       await ensureTools();
       const target = (selectedTargetId || "vscode").trim();
       const asked = typeof args.server === "string" ? args.server.trim() : "";
-      // Isolation: only the server selected in the dropdown can be listed. A request
-      // for any other server gets a generic refusal that does not reveal whether that
-      // server exists, is connected, or is toggled on.
-      if (asked && asked !== target) {
+      const companion = browseCompanionScope();
+      const listingCompanion = asked === BROWSE_SERVER && !!companion;
+      // Unapproved servers get the same refusal whether present or absent.
+      if (asked && asked !== target && !listingCompanion) {
         return `Output of '${name}':\nERROR: server "${asked}" is not available. Only the selected target "${target}" can be used in this session. Do NOT try other servers; ask the user to switch the target in the snapgentV3 selector if needed.`;
       }
-      const requested = target;
+      const requested = listingCompanion ? BROWSE_SERVER : target;
       if (!isMcpEnabled(requested)) {
         return `Output of '${name}':\nERROR: MCP server "${requested}" is disabled by the user. Do NOT use it. Tell the user to enable it in the MCP settings if it is needed.`;
       }
@@ -1231,24 +1272,28 @@
         // (these are validated fixes for real bugs, not filler).
         const note = ZS.TOOL_NOTES[bareToolName(t.name)];
         const noteStr = note ? `\n    ⚠ ${note}` : "";
-        return `${t.name}: ${(t.description || "").split("\n")[0]}${paramLines ? "\n" + paramLines : ""}${noteStr}`;
+        const toolName = listingCompanion ? browseToolName(t) : t.name;
+        return `${toolName}: ${(t.description || "").split("\n")[0]}${paramLines ? "\n" + paramLines : ""}${noteStr}`;
       });
-      return `Output of '${name}':\n${requested} commands (${scoped.length}):\n\n${lines.join("\n\n")}`;
+      return `Output of '${name}':\n${requested} commands (${scoped.length}):\n\n${lines.join("\n\n")}` +
+        (companion ? ZS.browseCompanionInstructions : "");
     }
-    // Isolation: execution is hard-limited to the server selected in the dropdown.
-    // 1) the selected target must be toggled on,
-    // 2) an explicit "server/tool" prefix may only name the selected target,
-    // 3) the tool must exist in the selected server's own catalogue (never skipped,
-    //    even when that catalogue is empty).
-    // The name sent to the bridge is NOT rewritten: the bridge only knows a "server/"
-    // prefix for tools whose names collide across servers.
+    // Only explicit, catalogued Browse calls can leave the selected target,
+    // and only while this conversation's user consent is still valid.
+    const companion = name.startsWith(`${BROWSE_SERVER}/`) ? browseCompanionScope() : null;
+    const server = companion ? BROWSE_SERVER : selectedTargetId;
+    const browseStopped = () => {
+      if (companion && browseCompanionScope() !== companion) A.stop = true;
+      return !!companion && A.stop;
+    };
     if (!isMcpEnabled(selectedTargetId)) {
       return `ERROR: the selected MCP server "${selectedTargetId}" is disabled by the user, so '${name}' was not run. Do NOT retry. Tell the user to enable it in the MCP settings.`;
     }
-    if (name.includes("/") && name.split("/")[0] !== selectedTargetId) {
+    if (name.includes("/") && name.split("/")[0] !== server) {
       return `ERROR: '${name}' was not run. Only the selected target "${selectedTargetId}" can be used in this session. Use plain command names from list_commands.`;
     }
-    if (!A.toolNames.size) await ensureTools();
+    if (companion || !A.toolNames.size) await ensureTools();
+    if (browseStopped()) return "(Browse stopped)";
     if (!knownTool(name)) {
       return ZS.FEEDBACK.unknownTool(name, [...A.toolNames]);
     }
@@ -1272,12 +1317,22 @@
     // the Stop button stuck. When the user halts (A.stop), abandon the wait within
     // ~150ms so the loop breaks and its finally unlocks everything. The in-flight
     // bridge call may still finish in the background; its result is just ignored.
-    let stopTimer;
-    const stopWatch = new Promise((res) => {
-      stopTimer = setInterval(() => { if (A.stop) res({ ok: false, kind: "stopped" }); }, 150);
-    });
-    let r = await Promise.race([bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId }), hardCap, stopWatch]);
-    clearInterval(stopTimer);
+    const request = { type: "call_tool", name, arguments: args, timeout, server };
+    async function callWithStop() {
+      let stopTimer;
+      const stopWatch = new Promise((resolve) => {
+        stopTimer = setInterval(() => {
+          if (A.stop || browseStopped()) resolve({ ok: false, kind: "stopped" });
+        }, 150);
+      });
+      try {
+        return await Promise.race([bg(request), hardCap, stopWatch]);
+      } finally {
+        clearInterval(stopTimer);
+      }
+    }
+    let r = await callWithStop();
+    if (browseStopped()) return "(Browse stopped)";
     if (r && r.kind === "stopped") return "(stopped by user)";
     if (!r) return ZS.FEEDBACK.bridgeOffline;
     // The MCP server answers SUCCESSFULLY (ok:true) when no Studio is attached
@@ -1306,7 +1361,7 @@
         /\b(?:ExecuteLuauTool|CommandExecution):\d+:/.test(r.text)) {
       r = { ok: false, error: r.text.replace(/^(?:\S*(?:ExecuteLuauTool|CommandExecution):\d+:\s*)+/, "").trim() || r.text };
     }
-    if (r.ok) {
+    const successfulFeedback = (r) => {
       if (r.images && r.images.length && !P.supportsVision) {
         // Any tool from ANY connected server can turn out to return images -
         // we don't try to predict this from its name in advance. This is the
@@ -1337,7 +1392,8 @@
       }
       const text = r.text && r.text.length ? r.text : "(tool returned an empty result)";
       return `Output of '${name}':\n${text}`;
-    }
+    };
+    if (r.ok) return successfulFeedback(r);
     // Orphaned content script - a page reload is the only cure, so say exactly
     // that instead of blaming the bridge (see bg / isContextInvalidated).
     if (r.kind === "stale-extension") {
@@ -1366,10 +1422,10 @@
       }
       diag("bridge.disconnectedRetry", { name });
       await new Promise((res) => setTimeout(res, 1200));
-      const retry = await Promise.race([
-        bg({ type: "call_tool", name, arguments: args, timeout, server: selectedTargetId }),
-        hardCap,
-      ]);
+      if (browseStopped()) return "(Browse stopped)";
+      const retry = companion ? await callWithStop() : await Promise.race([bg(request), hardCap]);
+      if (browseStopped()) return "(Browse stopped)";
+      if (companion && retry?.ok) return successfulFeedback(retry);
       // The retry itself has to be judged by the same rule. A second attempt
       // that goes out and then drops must NOT be reported as "bridge offline":
       // the tool may have run, and the model would retry it again.
@@ -1777,7 +1833,7 @@
               // what the model gets when it lists commands itself. Anti-drift only
               // needs the primary Roblox set; addon commands were listed on demand
               // and the bridge routes by name regardless.
-              toSend += ZS.toolsReminder(activeTools(), ui.getTargetName(), selectedTargetId);
+              toSend += ZS.toolsReminder(activeTools(), ui.getTargetName(), selectedTargetId, !!browseCompanionScope());
               if (selectedTargetId === "roblox") toSend += "\n" + ZS.memoryNudge();
               diag("tools.reminder", { after: REMIND_TOOLS_EVERY });
             }
@@ -2228,6 +2284,7 @@
       providerNotes: P.promptExtra || "",
       targetServer: selectedTargetId,
       targetName: ui.getTargetName(),
+      browseCompanion: !!browseCompanionScope(),
       skills: workspaceSkills,
       antislopRules: antislopWordRules(),
     });
@@ -3672,14 +3729,32 @@
           ? `<div class="zs-site-opt zs-site-here">${label}<span class="zs-site-badge">active</span></div>`
           : `<button class="zs-site-opt" data-u="${s.url}">${label}<span class="zs-site-go">&rarr;</span></button>`;
       }
+      const browseHere = !!P.conversationKey() && browseConsent?.conversation === P.conversationKey();
+      const showBrowse = browseHere || (A.started && !!P.conversationKey() && browseCompanionAvailable());
       menuEl.innerHTML =
         `<div class="zs-menu-head"><span class="zs-menu-logo">snapgentV3</span></div>
          <section class="zs-menu-sec">
            <div class="zs-sec-label zs-sec-label-row"><span>Switch AI</span><span><button id="zs-skills-settings" class="zs-gear" title="Skills" aria-label="Skills">&#9733;</button><button id="zs-mcp-settings" class="zs-gear" title="MCP settings" aria-label="MCP settings">&#9881;</button></span></div>
            <div class="zs-site-grid">${sites}</div>
          </section>
+         ${showBrowse ? `<section class="zs-menu-sec"><button type="button" class="zs-gear" id="zs-browse-companion" aria-pressed="${browseHere}">${browseHere ? "Disable Browse" : "Enable Browse"}</button><div class="zs-mcp-pop-note">For this ChatGPT conversation. Once enabled, ask ChatGPT to use Browse. Existing tabs still require lending.</div></section>` : ""}
          ${P.setVisionEnabled ? `<section class="zs-menu-sec"><label><input type="checkbox" id="zs-vision-enabled" ${P.supportsVision ? "checked" : ""}> Enable ChatGPT image feedback</label><div class="zs-mcp-pop-note">Uses normal provider upload limits. Off by default.</div><details><summary>Image delivery diagnostics</summary><pre id="zs-image-trace"></pre></details></section>` : ""}
          ${skillsSectionHtml()}`;
+      const browseButton = menuEl.querySelector("#zs-browse-companion");
+      browseButton?.addEventListener("click", (event) => {
+        if (!event.isTrusted) return;
+        const conversation = P.conversationKey();
+        if (browseConsent && browseConsent.conversation === conversation) {
+          revokeBrowseCompanion();
+        } else {
+          if (!conversation || !A.started || A.running || A.starting || A.injecting || !browseCompanionAvailable()) return;
+          browseConsent = { conversation };
+        }
+        const enabled = !!browseConsent;
+        browseButton.setAttribute("aria-pressed", String(enabled));
+        browseButton.textContent = enabled ? "Disable Browse" : "Enable Browse";
+        diag("browse.companion", { enabled });
+      });
       const trace = menuEl.querySelector("#zs-image-trace");
       if (trace) trace.textContent = imageTraceText();
       const visionBox = menuEl.querySelector("#zs-vision-enabled");
@@ -5074,7 +5149,8 @@
       const key = P.conversationKey();
       if (A.loopKey == null) {
         if (key && !P.chatIsEmpty()) A.loopKey = key; // pin the loop's conversation
-      } else if (key !== A.loopKey && P.chatIsEmpty()) {
+      } else if (key !== A.loopKey &&
+                 (P.chatIsEmpty() || (browseConsent?.conversation === A.loopKey && browseFeedbackInProgress()))) {
         diag("loop.abandonedNewChat", { from: A.loopKey, to: key });
         A.stop = true;       // the loop breaks at its next checkpoint; its finally
         A.loopKey = null;    // resets A.running / cover / lock, then state recomputes
